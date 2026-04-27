@@ -1,2 +1,3 @@
-# Example
-An example greeter plugin
+# Mining Stats
+
+A RuneLite plugin re
