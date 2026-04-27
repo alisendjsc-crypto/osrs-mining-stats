@@ -17,6 +17,7 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -24,6 +25,7 @@ import net.runelite.client.ui.overlay.OverlayManager;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Slf4j
 @PluginDescriptor(
@@ -33,13 +35,6 @@ import java.util.Map;
 )
 public class MiningStatsPlugin extends Plugin
 {
-	/**
-	 * Maximum staleness (ms) of a mining animation for a subsequent inventory delta to count
-	 * as a mining success. Generous enough to cover swing-to-inventory-event lag and tick
-	 * variance without admitting unrelated pickups.
-	 */
-	private static final long MINING_ANIMATION_GATE_MS = 3000L;
-
 	@Inject
 	private Client client;
 
@@ -52,11 +47,35 @@ public class MiningStatsPlugin extends Plugin
 	@Inject
 	private MiningStatsOverlay overlay;
 
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
+	private ConfigManager configManager;
+
 	@Getter
 	private RollingWindow rollingWindow;
 
-	private long lastMiningAnimationMs = Long.MIN_VALUE;
-	private Map<Integer, Integer> lastInventory;
+	/**
+	 * Persistence key prefix under config group {@code miningstats}. Full key is
+	 * {@code persisted.<normalizedPlayerName>}. Set dynamically via
+	 * {@link ConfigManager#setConfiguration}, so it does NOT appear in the {@code @ConfigItem}
+	 * settings panel.
+	 */
+	static final String PERSIST_KEY_PREFIX = "persisted.";
+
+	/** Last seen logged-in player name, lowercased + whitespace-normalized. Null until first login. */
+	private String lastKnownPlayerKey;
+
+	/** Once-per-session flag preventing repeated load attempts after CONNECTION_LOST → LOGGED_IN cycles. */
+	private boolean loadAttempted;
+
+	/**
+	 * Path B (v0.2.0): replaces the v0.1.x enum-membership gate with animation +
+	 * XP-delta-coincidence discrimination. Owns inventory snapshot, animation timestamp,
+	 * and the held-diff buffer.
+	 */
+	private MiningSuccessGate miningGate;
 
 	private int baselineMiningXp = -1;
 	private int currentMiningXp = 0;
@@ -65,12 +84,15 @@ public class MiningStatsPlugin extends Plugin
 	protected void startUp()
 	{
 		rollingWindow = new RollingWindow(config.afkThresholdSeconds() * 1000L);
-		lastMiningAnimationMs = Long.MIN_VALUE;
-		lastInventory = null;
+		miningGate = new MiningSuccessGate();
+		loadAttempted = false;
+		lastKnownPlayerKey = null;
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
 			baselineMiningXp = client.getSkillExperience(Skill.MINING);
 			currentMiningXp = baselineMiningXp;
+			// If we're already logged in at plugin enable, attempt restore immediately.
+			tryLoadPersistedSession();
 		}
 		else
 		{
@@ -84,65 +106,71 @@ public class MiningStatsPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		// Persist before clearing state so the next startUp can recover it.
+		persistCurrentSession();
 		overlayManager.remove(overlay);
 		rollingWindow = null;
-		lastInventory = null;
+		miningGate = null;
 		baselineMiningXp = -1;
 		currentMiningXp = 0;
-		lastMiningAnimationMs = Long.MIN_VALUE;
+		lastKnownPlayerKey = null;
+		loadAttempted = false;
 		log.debug("Mining Stats stopped");
 	}
 
 	@Subscribe
 	public void onAnimationChanged(AnimationChanged event)
 	{
-		if (event.getActor() != client.getLocalPlayer())
+		if (event.getActor() != client.getLocalPlayer() || miningGate == null)
 		{
 			return;
 		}
 		int animId = client.getLocalPlayer().getAnimation();
 		if (MiningAnimations.isMiningAnimation(animId))
 		{
-			lastMiningAnimationMs = System.currentTimeMillis();
+			miningGate.recordMiningAnimation(System.currentTimeMillis());
 		}
 	}
 
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
-		if (event.getContainerId() != InventoryID.INVENTORY.getId())
+		if (event.getContainerId() != InventoryID.INVENTORY.getId() || miningGate == null
+			|| rollingWindow == null)
 		{
 			return;
 		}
 		Map<Integer, Integer> current = countItems(event.getItemContainer());
-		if (lastInventory == null)
-		{
-			// First post-login or post-startup snapshot — baseline only, never count.
-			lastInventory = current;
-			return;
-		}
 		long now = System.currentTimeMillis();
-		boolean withinMiningGate = (now - lastMiningAnimationMs) <= MINING_ANIMATION_GATE_MS;
-		if (withinMiningGate && rollingWindow != null)
+		List<Integer> gained = miningGate.onInventoryChange(current, now);
+		for (int itemId : gained)
 		{
-			List<Integer> oresGained = InventoryDelta.oresGained(lastInventory, current);
-			for (int oreId : oresGained)
-			{
-				rollingWindow.recordEvent(oreId, now);
-			}
+			rollingWindow.recordEvent(itemId, now);
 		}
-		lastInventory = current;
 	}
 
 	@Subscribe
 	public void onStatChanged(StatChanged event)
 	{
-		if (event.getSkill() == Skill.MINING)
+		if (event.getSkill() != Skill.MINING)
 		{
-			currentMiningXp = event.getXp();
-			if (baselineMiningXp == -1)
+			return;
+		}
+		int previousXp = currentMiningXp;
+		currentMiningXp = event.getXp();
+		if (baselineMiningXp == -1)
+		{
+			// First Mining StatChanged after startUp on a not-yet-logged-in client.
+			baselineMiningXp = currentMiningXp;
+			return;
+		}
+		if (currentMiningXp > previousXp && miningGate != null && rollingWindow != null)
+		{
+			long now = System.currentTimeMillis();
+			List<Integer> gained = miningGate.onMiningXpDelta(now);
+			for (int itemId : gained)
 			{
-				baselineMiningXp = currentMiningXp;
+				rollingWindow.recordEvent(itemId, now);
 			}
 		}
 	}
@@ -158,14 +186,21 @@ public class MiningStatsPlugin extends Plugin
 				baselineMiningXp = client.getSkillExperience(Skill.MINING);
 				currentMiningXp = baselineMiningXp;
 			}
+			handlePossibleCharacterSwitch();
+			tryLoadPersistedSession();
 		}
 		else if (state == GameState.LOGIN_SCREEN
 			|| state == GameState.HOPPING
 			|| state == GameState.CONNECTION_LOST)
 		{
+			// Save before the disconnect blanks our state surface.
+			persistCurrentSession();
 			// Force re-baseline on the next inventory event so the post-login snapshot
 			// doesn't get diffed against pre-logout state.
-			lastInventory = null;
+			if (miningGate != null)
+			{
+				miningGate.resetInventoryBaseline();
+			}
 		}
 	}
 
@@ -188,10 +223,10 @@ public class MiningStatsPlugin extends Plugin
 		return baselineMiningXp == -1 ? 0 : currentMiningXp - baselineMiningXp;
 	}
 
-	/** True if a mining animation has played within {@link #MINING_ANIMATION_GATE_MS}. */
+	/** True if a mining animation has played within the gate's animation window. */
 	public boolean isCurrentlyMining()
 	{
-		return (System.currentTimeMillis() - lastMiningAnimationMs) <= MINING_ANIMATION_GATE_MS;
+		return miningGate != null && miningGate.isAnimationGateActive(System.currentTimeMillis());
 	}
 
 	/** Free inventory slots remaining, or -1 if the inventory container isn't currently available. */
@@ -211,6 +246,147 @@ public class MiningStatsPlugin extends Plugin
 			}
 		}
 		return Math.max(0, InventoryEta.INVENTORY_CAPACITY - filled);
+	}
+
+	/**
+	 * Display name for an item ID. Prefers the curated short name from {@link Ores}; falls
+	 * back to the in-game item name via {@code ItemManager} for IDs not in the enum (Path B
+	 * detection can record any item, not just enum members).
+	 */
+	public String displayNameFor(int itemId)
+	{
+		if (Ores.isOre(itemId))
+		{
+			return Ores.displayName(itemId);
+		}
+		try
+		{
+			String name = itemManager.getItemComposition(itemId).getName();
+			if (name != null && !name.isEmpty() && !"null".equals(name))
+			{
+				return name;
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// Unknown item or cache miss — fall through to placeholder.
+		}
+		return "Item " + itemId;
+	}
+
+	/**
+	 * Stable per-character ConfigManager key fragment. OSRS player names are alnum + spaces +
+	 * underscores, max 12 chars; lowercase + whitespace→underscore yields a properties-safe
+	 * fragment that survives display-capitalization changes.
+	 */
+	static String normalizePlayerName(String raw)
+	{
+		if (raw == null)
+		{
+			return null;
+		}
+		String trimmed = raw.trim();
+		if (trimmed.isEmpty())
+		{
+			return null;
+		}
+		return trimmed.toLowerCase().replace(' ', '_');
+	}
+
+	private void captureLastKnownPlayerKey()
+	{
+		if (client.getLocalPlayer() == null)
+		{
+			return;
+		}
+		String key = normalizePlayerName(client.getLocalPlayer().getName());
+		if (key != null)
+		{
+			lastKnownPlayerKey = key;
+		}
+	}
+
+	/**
+	 * Detect a character switch (Jagex-launcher hop or relog as a different character without
+	 * fully restarting the client) and roll the in-memory window over to the new character.
+	 *
+	 * <p>Sequence: save current window under the OLD key, clear the window, update the key,
+	 * reset the once-per-startup load flag so {@link #tryLoadPersistedSession} re-attempts for
+	 * the new character.
+	 *
+	 * <p>If the local player isn't resolved yet, no-op — we'll re-check on the next event.
+	 * If the key is unchanged (reconnect as same character), no-op — preserves any in-flight
+	 * window state and avoids resetting the load flag prematurely.
+	 */
+	private void handlePossibleCharacterSwitch()
+	{
+		if (client.getLocalPlayer() == null)
+		{
+			return;
+		}
+		String currentKey = normalizePlayerName(client.getLocalPlayer().getName());
+		if (currentKey == null || currentKey.equals(lastKnownPlayerKey))
+		{
+			return;
+		}
+		if (lastKnownPlayerKey != null && rollingWindow != null)
+		{
+			// Save departing character's stats under their key BEFORE swapping.
+			persistCurrentSession();
+			rollingWindow.clear();
+		}
+		lastKnownPlayerKey = currentKey;
+		loadAttempted = false;
+	}
+
+	private void tryLoadPersistedSession()
+	{
+		if (loadAttempted || rollingWindow == null || configManager == null)
+		{
+			return;
+		}
+		// Player name flickers null around state transitions; only act once we have it stable.
+		captureLastKnownPlayerKey();
+		if (lastKnownPlayerKey == null)
+		{
+			return;
+		}
+		// Don't clobber an in-progress session — only restore if we're starting from zero.
+		if (rollingWindow.totalCount() != 0)
+		{
+			loadAttempted = true;
+			return;
+		}
+		String blob = configManager.getConfiguration("miningstats", PERSIST_KEY_PREFIX + lastKnownPlayerKey);
+		Optional<RollingWindow.Snapshot> snap = SessionPersistence.parse(
+			blob, System.currentTimeMillis(), SessionPersistence.DEFAULT_MAX_AGE_MS);
+		if (snap.isPresent())
+		{
+			rollingWindow.restoreFromSnapshot(snap.get());
+			log.debug("Mining Stats restored {} events for {}", snap.get().events.size(), lastKnownPlayerKey);
+		}
+		// Whether or not the load succeeded, mark attempted so we don't retry every LOGGED_IN.
+		loadAttempted = true;
+	}
+
+	private void persistCurrentSession()
+	{
+		if (rollingWindow == null || configManager == null || lastKnownPlayerKey == null)
+		{
+			return;
+		}
+		RollingWindow.Snapshot snap = rollingWindow.exportSnapshot();
+		String serialized = SessionPersistence.serialize(snap, System.currentTimeMillis());
+		String key = PERSIST_KEY_PREFIX + lastKnownPlayerKey;
+		if (serialized == null)
+		{
+			// Empty session — clear any stale persisted blob so a future login starts fresh.
+			configManager.unsetConfiguration("miningstats", key);
+		}
+		else
+		{
+			configManager.setConfiguration("miningstats", key, serialized);
+		}
 	}
 
 	private static Map<Integer, Integer> countItems(ItemContainer container)

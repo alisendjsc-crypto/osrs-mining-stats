@@ -14,8 +14,14 @@ import java.util.Map;
 
 /**
  * Top-right panel rendering the SPEC's five lines: session XP, active rate, session total,
- * inventory ETA, and per-ore breakdown. Hidden entirely when nothing has been mined yet and
- * the player isn't currently mining — keeps the screen clean before activity starts.
+ * inventory ETA, and per-ore breakdown. Hidden when no mining activity falls within the
+ * configured rolling window AND the player isn't currently swinging — keeps the overlay
+ * off-screen during fishing/banking/idle, and disappears after a session naturally drains.
+ *
+ * <p>v0.2.0: title color is the activity indicator (green = actively mining, light gray =
+ * stale/post-swing). With auto-hide, the three overlay states are now distinguishable at
+ * a glance: hidden = correctly idle, green title = working, gray title = canary that
+ * detection has stopped picking up swings.
  */
 public class MiningStatsOverlay extends OverlayPanel
 {
@@ -38,21 +44,35 @@ public class MiningStatsOverlay extends OverlayPanel
 		{
 			return null;
 		}
-		// Suppress the panel until there's something to show.
-		if (window.totalCount() == 0 && !plugin.isCurrentlyMining())
-		{
-			return null;
-		}
 
 		long now = System.currentTimeMillis();
 		long windowMs = config.windowMinutes() * 60_000L;
 
+		// Auto-hide: suppress the panel when the player isn't mining now AND no events
+		// remain inside the rolling window. The pre-first-mine case (rate == 0, total == 0)
+		// is naturally subsumed; the post-session-drain case (mined earlier, walked away,
+		// rolling window emptied) is the new behavior over v0.1.x. Compute the rate once
+		// and reuse below — activeRatePerHour iterates the event log, not free per call.
+		boolean activelyMining = plugin.isCurrentlyMining();
+		double rate = window.activeRatePerHour(windowMs, now);
+		boolean hasRecentActivity = rate > 0.0;
+		if (!activelyMining && !hasRecentActivity)
+		{
+			return null;
+		}
+
 		panelComponent.getChildren().clear();
 		panelComponent.setPreferredSize(new Dimension(160, 0));
 
+		// v0.2.0 indicator: title color is the canary for the three overlay states.
+		//   GREEN — actively mining (visible + working).
+		//   LIGHT_GRAY — visible because the rolling window still has events but no recent
+		//     swing detected; either the player just stopped or detection has gone stale.
+		// (The hidden-while-idle case is handled above by returning null.)
+		Color titleColor = activelyMining ? new Color(108, 217, 108) : Color.LIGHT_GRAY;
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text("Mining Stats")
-			.color(Color.WHITE)
+			.color(titleColor)
 			.build());
 
 		// Session XP — only show once XP has been accrued under the plugin.
@@ -63,7 +83,6 @@ public class MiningStatsOverlay extends OverlayPanel
 		}
 
 		// Active rate (events per hour over the configured window).
-		double rate = window.activeRatePerHour(windowMs, now);
 		addLine("Ores/hr", String.format("%,d", Math.round(rate)));
 
 		// Session total.
@@ -92,7 +111,7 @@ public class MiningStatsOverlay extends OverlayPanel
 				int oreId = entry.getKey();
 				int oreTotal = entry.getValue();
 				double oreRate = window.activeRatePerHour(oreId, windowMs, now);
-				addLine(Ores.displayName(oreId),
+				addLine(plugin.displayNameFor(oreId),
 					String.format("%,d (%,d/h)", oreTotal, Math.round(oreRate)));
 			}
 		}

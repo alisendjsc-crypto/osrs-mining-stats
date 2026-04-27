@@ -1,10 +1,13 @@
 package com.josiahcooper.miningstats;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -155,6 +158,47 @@ public final class RollingWindow
 		lastEventWallMs = Long.MIN_VALUE;
 	}
 
+	/**
+	 * Export a serializable snapshot of all internal state. Used by {@link SessionPersistence}
+	 * to survive client disconnects. The returned object is a defensive copy — mutating the
+	 * snapshot's collections does not affect this window.
+	 */
+	public Snapshot exportSnapshot()
+	{
+		List<EventData> exported = new ArrayList<>(events.size());
+		for (Event e : events)
+		{
+			exported.add(new EventData(e.oreId, e.wallTimeMs, e.activeTimeMs));
+		}
+		return new Snapshot(
+			cumulativeActiveMs,
+			lastEventWallMs,
+			sessionTotal,
+			Collections.unmodifiableList(exported),
+			Collections.unmodifiableMap(new HashMap<>(sessionByOre))
+		);
+	}
+
+	/**
+	 * Restore state from a snapshot. Clears any existing state first. The AFK threshold is
+	 * NOT touched — current threshold remains in effect for future events. Past events keep
+	 * the active-time classification they were given when originally recorded, matching the
+	 * documented {@link #setAfkThresholdMs} semantics.
+	 */
+	public void restoreFromSnapshot(Snapshot snap)
+	{
+		events.clear();
+		sessionByOre.clear();
+		for (EventData d : snap.events)
+		{
+			events.addLast(new Event(d.oreId, d.wallTimeMs, d.activeTimeMs));
+		}
+		sessionByOre.putAll(snap.sessionByOre);
+		sessionTotal = snap.sessionTotal;
+		cumulativeActiveMs = snap.cumulativeActiveMs;
+		lastEventWallMs = snap.lastEventWallMs;
+	}
+
 	private long currentActiveTime(long nowWallMs)
 	{
 		if (lastEventWallMs == Long.MIN_VALUE)
@@ -200,6 +244,41 @@ public final class RollingWindow
 			this.oreId = oreId;
 			this.wallTimeMs = wallTimeMs;
 			this.activeTimeMs = activeTimeMs;
+		}
+	}
+
+	/** Serializable triple mirroring the private {@code Event} class. */
+	public static final class EventData
+	{
+		public final int oreId;
+		public final long wallTimeMs;
+		public final long activeTimeMs;
+
+		public EventData(int oreId, long wallTimeMs, long activeTimeMs)
+		{
+			this.oreId = oreId;
+			this.wallTimeMs = wallTimeMs;
+			this.activeTimeMs = activeTimeMs;
+		}
+	}
+
+	/** Immutable snapshot of {@link RollingWindow} internal state for persistence. */
+	public static final class Snapshot
+	{
+		public final long cumulativeActiveMs;
+		public final long lastEventWallMs;
+		public final int sessionTotal;
+		public final List<EventData> events;
+		public final Map<Integer, Integer> sessionByOre;
+
+		public Snapshot(long cumulativeActiveMs, long lastEventWallMs, int sessionTotal,
+			List<EventData> events, Map<Integer, Integer> sessionByOre)
+		{
+			this.cumulativeActiveMs = cumulativeActiveMs;
+			this.lastEventWallMs = lastEventWallMs;
+			this.sessionTotal = sessionTotal;
+			this.events = events;
+			this.sessionByOre = sessionByOre;
 		}
 	}
 }

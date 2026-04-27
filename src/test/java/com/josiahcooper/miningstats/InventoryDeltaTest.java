@@ -10,9 +10,14 @@ import java.util.Map;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+/**
+ * v0.2.0: InventoryDelta is now a pure positive-diff over arbitrary item IDs. The
+ * mining-discrimination role moved upstream to {@link MiningSuccessGate}; non-ore items are
+ * no longer filtered here. Tests reflect that contract change.
+ */
 public class InventoryDeltaTest
 {
-	private static final int BIRD_NEST = 5070; // any non-ore item ID; just needs to not appear in Ores.
+	private static final int BIRD_NEST = 5070; // any non-ore item ID
 
 	private static Map<Integer, Integer> map(Object... pairs)
 	{
@@ -27,13 +32,13 @@ public class InventoryDeltaTest
 	@Test
 	public void emptyToEmptyReportsNothing()
 	{
-		assertTrue(InventoryDelta.oresGained(map(), map()).isEmpty());
+		assertTrue(InventoryDelta.itemsGained(map(), map()).isEmpty());
 	}
 
 	@Test
-	public void firstOrePickupReports()
+	public void firstItemPickupReports()
 	{
-		List<Integer> gained = InventoryDelta.oresGained(
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(),
 			map(ItemID.COPPER_ORE, 1));
 		assertEquals(1, gained.size());
@@ -43,7 +48,7 @@ public class InventoryDeltaTest
 	@Test
 	public void stackGrowsByExactDelta()
 	{
-		List<Integer> gained = InventoryDelta.oresGained(
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(ItemID.COPPER_ORE, 5),
 			map(ItemID.COPPER_ORE, 8));
 		assertEquals(3, gained.size());
@@ -57,16 +62,16 @@ public class InventoryDeltaTest
 	public void stackShrinksReportsNothing()
 	{
 		// Drop or bank — never count.
-		List<Integer> gained = InventoryDelta.oresGained(
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(ItemID.COPPER_ORE, 5),
 			map(ItemID.COPPER_ORE, 2));
 		assertTrue(gained.isEmpty());
 	}
 
 	@Test
-	public void mixedOreDeltaCountsOnlyTheGainer()
+	public void mixedDeltaCountsOnlyTheGainer()
 	{
-		List<Integer> gained = InventoryDelta.oresGained(
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(ItemID.COPPER_ORE, 5),
 			map(ItemID.COPPER_ORE, 5, ItemID.IRON_ORE, 2));
 		assertEquals(2, gained.size());
@@ -77,22 +82,26 @@ public class InventoryDeltaTest
 	}
 
 	@Test
-	public void nonOreItemIgnoredEvenWhenAlongsideOre()
+	public void nonOreItemNowAppearsInDiff()
 	{
-		// Bird's nest drop alongside a successful copper swing — nest ignored, copper counted.
-		List<Integer> gained = InventoryDelta.oresGained(
+		// v0.2.0 contract: filtering moved upstream. A bird's nest gain is reported here;
+		// MiningSuccessGate decides whether to discard it based on animation + XP coincidence.
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(ItemID.COPPER_ORE, 3),
 			map(ItemID.COPPER_ORE, 4, BIRD_NEST, 1));
-		assertEquals(1, gained.size());
-		assertEquals(Integer.valueOf(ItemID.COPPER_ORE), gained.get(0));
+		assertEquals(2, gained.size());
+		assertTrue(gained.contains(ItemID.COPPER_ORE));
+		assertTrue(gained.contains(BIRD_NEST));
 	}
 
 	@Test
-	public void nonOreOnlyReportsNothing()
+	public void nonOreOnlyReportsTheItem()
 	{
-		List<Integer> gained = InventoryDelta.oresGained(
+		// v0.2.0: previously filtered; now reported.
+		List<Integer> gained = InventoryDelta.itemsGained(
 			map(),
 			map(BIRD_NEST, 1));
-		assertTrue(gained.isEmpty());
+		assertEquals(1, gained.size());
+		assertEquals(Integer.valueOf(BIRD_NEST), gained.get(0));
 	}
 }
