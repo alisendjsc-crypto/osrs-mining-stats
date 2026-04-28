@@ -40,4 +40,26 @@ public final class InventoryDelta
 		}
 		return gained;
 	}
+
+	/**
+	 * True if any item ID in {@code before} has a strictly smaller quantity in {@code after}
+	 * (including items that disappeared from {@code after} entirely). Used by
+	 * {@link MiningSuccessGate}'s manual-banking filter (v0.3.0): a paired
+	 * inventory-negative + bank-positive in the same window indicates a deposit, not an
+	 * auto-banked mining yield.
+	 *
+	 * <p>Iterates {@code before} keys (not {@code after}) so disappeared items are caught;
+	 * the symmetric "items gained" path iterates {@code after} for the same reason.
+	 */
+	public static boolean hasNegativeDelta(Map<Integer, Integer> before, Map<Integer, Integer> after)
+	{
+		for (Map.Entry<Integer, Integer> entry : before.entrySet())
+		{
+			if (after.getOrDefault(entry.getKey(), 0) < entry.getValue())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 }

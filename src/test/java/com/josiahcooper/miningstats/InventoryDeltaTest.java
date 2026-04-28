@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -103,5 +104,51 @@ public class InventoryDeltaTest
 			map(BIRD_NEST, 1));
 		assertEquals(1, gained.size());
 		assertEquals(Integer.valueOf(BIRD_NEST), gained.get(0));
+	}
+
+	// --- v0.3.0 hasNegativeDelta tests ---
+	// Used by MiningSuccessGate's manual-banking filter. Must catch partial losses AND
+	// items that disappear from the snapshot entirely.
+
+	@Test
+	public void hasNegativeDelta_emptyToEmpty_false()
+	{
+		assertFalse(InventoryDelta.hasNegativeDelta(map(), map()));
+	}
+
+	@Test
+	public void hasNegativeDelta_gainOnly_false()
+	{
+		assertFalse(InventoryDelta.hasNegativeDelta(
+			map(ItemID.COPPER_ORE, 3),
+			map(ItemID.COPPER_ORE, 5)));
+	}
+
+	@Test
+	public void hasNegativeDelta_partialLoss_true()
+	{
+		// Stack shrinks (manual partial deposit, drop, etc.).
+		assertTrue(InventoryDelta.hasNegativeDelta(
+			map(ItemID.COPPER_ORE, 28),
+			map(ItemID.COPPER_ORE, 18)));
+	}
+
+	@Test
+	public void hasNegativeDelta_itemDisappears_true()
+	{
+		// Item disappears entirely from the snapshot (e.g., deposit-all). The implementation
+		// must iterate `before` keys, not `after`, to catch this.
+		assertTrue(InventoryDelta.hasNegativeDelta(
+			map(ItemID.COPPER_ORE, 5),
+			map()));
+	}
+
+	@Test
+	public void hasNegativeDelta_mixedGainAndLoss_true()
+	{
+		// Some items gained, some lost — ANY loss triggers the filter.
+		assertTrue(InventoryDelta.hasNegativeDelta(
+			map(ItemID.COPPER_ORE, 5, ItemID.IRON_ORE, 3),
+			map(ItemID.COPPER_ORE, 8, ItemID.IRON_ORE, 1)));
 	}
 }

@@ -135,14 +135,30 @@ public class MiningStatsPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
-		if (event.getContainerId() != InventoryID.INVENTORY.getId() || miningGate == null
-			|| rollingWindow == null)
+		if (miningGate == null || rollingWindow == null)
 		{
 			return;
 		}
-		Map<Integer, Integer> current = countItems(event.getItemContainer());
+		int containerId = event.getContainerId();
 		long now = System.currentTimeMillis();
-		List<Integer> gained = miningGate.onInventoryChange(current, now);
+		List<Integer> gained;
+		if (containerId == InventoryID.INVENTORY.getId())
+		{
+			Map<Integer, Integer> current = countItems(event.getItemContainer());
+			gained = miningGate.onInventoryChange(current, now);
+		}
+		else if (containerId == InventoryID.BANK.getId())
+		{
+			// v0.3.0: bank container is a secondary item-source for OSRS Leagues auto-bank
+			// relics and any future auto-deposit content. Manual-banking false positives are
+			// filtered inside the gate via the recent-inventory-negative paired-diff check.
+			Map<Integer, Integer> current = countItems(event.getItemContainer());
+			gained = miningGate.onBankChange(current, now);
+		}
+		else
+		{
+			return;
+		}
 		for (int itemId : gained)
 		{
 			rollingWindow.recordEvent(itemId, now);
