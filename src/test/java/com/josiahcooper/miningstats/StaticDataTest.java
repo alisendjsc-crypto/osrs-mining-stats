@@ -1,6 +1,7 @@
 package com.josiahcooper.miningstats;
 
 import net.runelite.api.ItemID;
+import net.runelite.api.gameval.AnimationID;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -111,5 +112,72 @@ public class StaticDataTest
 			assertTrue("Expected " + id + " to be reported as a mining animation",
 				MiningAnimations.isMiningAnimation(id));
 		}
+	}
+
+	/**
+	 * v0.3.1 regression guard. v0.2.0 + v0.3.0 imported from
+	 * {@code net.runelite.api.AnimationID} which only exposes floor-mining variants
+	 * (e.g. adamant = 628). Wall-mounted rocks like Camdozaal barronite emit the
+	 * {@code _WALL} variant (adamant wall = 6756), which the gameval namespace exposes
+	 * but the legacy namespace did not. v0.3.1 migrates to gameval and includes the
+	 * full variant lineup. Hardcoding the canonical Jagex animation IDs here so any
+	 * future namespace shuffling that loses a variant fails the test loudly.
+	 */
+	@Test
+	public void wallMountedRockAnimations_areRecognized()
+	{
+		// The load-bearing fix: adamant wall variant. Without this, Camdozaal barronite
+		// mining never activates the gate. Same shape as the prod regression Josiah hit.
+		assertTrue("HUMAN_MINING_ADAMANT_PICKAXE_WALL (6756) — v0.3.1 fix's anchor",
+			MiningAnimations.isMiningAnimation(6756));
+
+		// Sanity: the floor variants we already had still resolve. Stable IDs from
+		// gameval AnimationID — these are Jagex internal cache IDs, fixed by the game data.
+		assertTrue("HUMAN_MINING_ADAMANT_PICKAXE (628)",
+			MiningAnimations.isMiningAnimation(628));
+		assertTrue("HUMAN_MINING_RUNE_PICKAXE (624)",
+			MiningAnimations.isMiningAnimation(624));
+		assertTrue("HUMAN_MINING_DRAGON_PICKAXE (7139)",
+			MiningAnimations.isMiningAnimation(7139));
+
+		// Representative coverage of other wall variants — Trahaearn mine, Prifddinas
+		// mine, anywhere with vertical rock walls would emit one of these per pickaxe.
+		assertTrue("HUMAN_MINING_RUNE_PICKAXE_WALL (6752)",
+			MiningAnimations.isMiningAnimation(6752));
+		assertTrue("HUMAN_MINING_BRONZE_PICKAXE_WALL (6753)",
+			MiningAnimations.isMiningAnimation(6753));
+		assertTrue("HUMAN_MINING_IRON_PICKAXE_WALL (6754)",
+			MiningAnimations.isMiningAnimation(6754));
+		assertTrue("HUMAN_MINING_STEEL_PICKAXE_WALL (6755)",
+			MiningAnimations.isMiningAnimation(6755));
+		assertTrue("HUMAN_MINING_MITHRIL_PICKAXE_WALL",
+			MiningAnimations.isMiningAnimation(AnimationID.HUMAN_MINING_MITHRIL_PICKAXE_WALL));
+
+		// No-reach-forward variant — alternate orientation handled by Jagex for some
+		// rock geometries. Same coverage gap as wall variants in pre-0.3.1.
+		assertTrue("HUMAN_MINING_ADAMANT_PICKAXE_NOREACHFORWARD (6750)",
+			MiningAnimations.isMiningAnimation(6750));
+
+		// Power-swing variant — rare swing animation used in some special mining
+		// activities. Included for completeness.
+		assertTrue("PICKAXE_POWER_SWING_ADAMANT",
+			MiningAnimations.isMiningAnimation(AnimationID.PICKAXE_POWER_SWING_ADAMANT));
+	}
+
+	/**
+	 * Membership-count sanity check. v0.3.1 set should be substantially larger than
+	 * v0.3.0's 13 entries — we now mirror the standard Mining plugin's coverage.
+	 * If a future rebase accidentally drops half the entries, this test fails loudly
+	 * before reaching a player.
+	 */
+	@Test
+	public void miningAnimationsSetCoversAllPickaxeTiers()
+	{
+		// Lower bound — 13 was v0.3.0's value; we expect at least 60 with full variant
+		// coverage across all pickaxe tiers (~17 tiers × ~4 variants each, minus a few
+		// missing power-swing variants on cosmetic pickaxes).
+		assertTrue("Expected substantially expanded animation set in v0.3.1+ (size: "
+				+ MiningAnimations.all().size() + ")",
+			MiningAnimations.all().size() >= 60);
 	}
 }

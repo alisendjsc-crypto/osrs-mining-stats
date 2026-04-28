@@ -140,19 +140,38 @@ public class MiningStatsPlugin extends Plugin
 			return;
 		}
 		int containerId = event.getContainerId();
-		long now = System.currentTimeMillis();
+		if (containerId != InventoryID.INVENTORY.getId() && containerId != InventoryID.BANK.getId())
+		{
+			return;
+		}
+		Map<Integer, Integer> current = countItems(event.getItemContainer());
+		handleItemContainerEvent(containerId, current, System.currentTimeMillis());
+	}
+
+	/**
+	 * Plugin-layer dispatch from a container event into the gate. Package-private so
+	 * {@code PluginEventRoutingTest} can exercise this seam with synthetic inputs without
+	 * needing to construct RuneLite {@link ItemContainerChanged} events or mock
+	 * {@link ItemContainer}. The event-extraction shell ({@link #onItemContainerChanged})
+	 * is behavior-preserving — same null guard, same container-ID filter, same dispatch.
+	 *
+	 * <p>v0.3.0: bank container is a secondary item-source for OSRS Leagues auto-bank
+	 * relics and any future auto-deposit content. Manual-banking false positives are
+	 * filtered inside the gate via the recent-inventory-negative paired-diff check.
+	 */
+	void handleItemContainerEvent(int containerId, Map<Integer, Integer> current, long now)
+	{
+		if (miningGate == null || rollingWindow == null)
+		{
+			return;
+		}
 		List<Integer> gained;
 		if (containerId == InventoryID.INVENTORY.getId())
 		{
-			Map<Integer, Integer> current = countItems(event.getItemContainer());
 			gained = miningGate.onInventoryChange(current, now);
 		}
 		else if (containerId == InventoryID.BANK.getId())
 		{
-			// v0.3.0: bank container is a secondary item-source for OSRS Leagues auto-bank
-			// relics and any future auto-deposit content. Manual-banking false positives are
-			// filtered inside the gate via the recent-inventory-negative paired-diff check.
-			Map<Integer, Integer> current = countItems(event.getItemContainer());
 			gained = miningGate.onBankChange(current, now);
 		}
 		else
