@@ -12,6 +12,7 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.Skill;
 import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.StatChanged;
 import net.runelite.client.config.ConfigManager;
@@ -132,6 +133,46 @@ public class MiningStatsPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Heartbeat for the gate's animation freshness. {@code AnimationChanged} fires only on
+	 * animation-ID transitions; OSRS pickaxe animations frequently loop in-place during
+	 * continuous mining without re-emitting an ID change. Without this poll the gate
+	 * would close {@code DEFAULT_ANIMATION_GATE_MS} after the first swing's transition and
+	 * stay closed despite continued swinging — leaving {@link #isCurrentlyMining()} false
+	 * (no green title, ETA hidden) and starving yields landing outside that 3s window.
+	 *
+	 * <p>Polling per game tick (~600ms) refreshes the gate any time the player's current
+	 * animation matches a mining animation. Mirrors the first-party {@code mining} plugin's
+	 * tick-based detection pattern. Added in v0.3.2 in response to FlowersOEvil reporting
+	 * that the title-color indicator never turned green during regular play.
+	 */
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		if (miningGate == null || client.getLocalPlayer() == null)
+		{
+			return;
+		}
+		handleAnimationHeartbeat(client.getLocalPlayer().getAnimation(), System.currentTimeMillis());
+	}
+
+	/**
+	 * Plugin-layer seam for the per-tick animation heartbeat. Package-private so
+	 * {@code PluginEventRoutingTest} can drive it with synthetic anim IDs without mocking
+	 * {@link Client} or {@link net.runelite.api.Player}.
+	 */
+	void handleAnimationHeartbeat(int animId, long now)
+	{
+		if (miningGate == null)
+		{
+			return;
+		}
+		if (MiningAnimations.isMiningAnimation(animId))
+		{
+			miningGate.recordMiningAnimation(now);
+		}
+	}
+
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
@@ -140,7 +181,7 @@ public class MiningStatsPlugin extends Plugin
 			return;
 		}
 		int containerId = event.getContainerId();
-		if (containerId != InventoryID.INVENTORY.getId() && containerId != InventoryID.BANK.getId())
+		if (containerId != InventoryID.INVENTORY.getId())
 		{
 			return;
 		}
@@ -155,9 +196,10 @@ public class MiningStatsPlugin extends Plugin
 	 * {@link ItemContainer}. The event-extraction shell ({@link #onItemContainerChanged})
 	 * is behavior-preserving — same null guard, same container-ID filter, same dispatch.
 	 *
-	 * <p>v0.3.0: bank container is a secondary item-source for OSRS Leagues auto-bank
-	 * relics and any future auto-deposit content. Manual-banking false positives are
-	 * filtered inside the gate via the recent-inventory-negative paired-diff check.
+	 * <p>v0.3.2 revert: only the inventory container is routed. The bank container path
+	 * was removed after the Endless Harvest test on Leagues empirically demonstrated that
+	 * direct-to-bank auto-deposit relics do not produce observable bank events while the
+	 * bank UI is closed; the architecture's load-bearing assumption was false.
 	 */
 	void handleItemContainerEvent(int containerId, Map<Integer, Integer> current, long now)
 	{
@@ -165,19 +207,11 @@ public class MiningStatsPlugin extends Plugin
 		{
 			return;
 		}
-		List<Integer> gained;
-		if (containerId == InventoryID.INVENTORY.getId())
-		{
-			gained = miningGate.onInventoryChange(current, now);
-		}
-		else if (containerId == InventoryID.BANK.getId())
-		{
-			gained = miningGate.onBankChange(current, now);
-		}
-		else
+		if (containerId != InventoryID.INVENTORY.getId())
 		{
 			return;
 		}
+		List<Integer> gained = miningGate.onInventoryChange(current, now);
 		for (int itemId : gained)
 		{
 			rollingWindow.recordEvent(itemId, now);

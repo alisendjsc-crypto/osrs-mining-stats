@@ -3,7 +3,6 @@ package com.josiahcooper.miningstats;
 import net.runelite.api.InventoryID;
 import net.runelite.api.ItemID;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import java.lang.reflect.Field;
@@ -11,40 +10,28 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Plugin-layer event-routing tests. Closes the test-coverage gap that let v0.3.0 ship with
- * a base-game regression invisible to the 76 gate-level unit tests. The pre-existing tests
- * in {@link MiningSuccessGateTest} exercised {@link MiningSuccessGate} in isolation with
- * controlled inputs; they did not cover the path from {@link MiningStatsPlugin}'s
- * {@code @Subscribe} handlers through the container-id dispatch into the gate.
+ * a base-game regression invisible to the gate-level unit tests. {@link MiningSuccessGateTest}
+ * exercises the gate in isolation; this class exercises the path from
+ * {@link MiningStatsPlugin}'s {@code @Subscribe} handlers through container-id dispatch and
+ * (v0.3.2) the per-tick animation heartbeat.
  *
- * <p>This class exercises that dispatch via {@link MiningStatsPlugin#handleItemContainerEvent},
- * the package-private seam introduced in v0.3.1 to make event-routing testable without
- * mocking RuneLite's {@link net.runelite.api.events.ItemContainerChanged} or
- * {@link net.runelite.api.ItemContainer}. Animation and XP-delta state are driven directly
- * via the gate API (the same calls the plugin's animation/XP handlers make).
+ * <p>Dispatch tests use the package-private seams {@link MiningStatsPlugin#handleItemContainerEvent}
+ * and {@link MiningStatsPlugin#handleAnimationHeartbeat} so the harness doesn't need to
+ * construct RuneLite events or mock {@link net.runelite.api.ItemContainer} /
+ * {@link net.runelite.api.Player}. Animation and XP-delta state are driven directly via the
+ * gate API (the same calls the plugin's animation/XP handlers make).
  *
- * <p><strong>Scenario I vs II distinction.</strong> The v0.3.0 → v0.2.0 source diff is
- * purely additive for the inventory path: new {@code lastBank} / {@code recentInventoryNegativeMs}
- * fields, new {@code onBankChange} method, new {@code hasNegativeDelta} write inside
- * {@code onInventoryChange}. {@code recentInventoryNegativeMs} is read only by
- * {@code onBankChange}. Two interpretations of the v0.3.0 base-game regression follow:
- *
- * <ul>
- *   <li><strong>Scenario I:</strong> bank events do not fire during base-game mining (or fire
- *       only with empty diffs). v0.2.0 and v0.3.0 base-game paths produce identical outputs;
- *       v0.2.0 is also broken; rollback to v0.2.0 doesn't fix the regression. The actual
- *       last-verified-working release is v0.1.1 (enum-gate architecture).</li>
- *   <li><strong>Scenario II:</strong> bank events fire during base-game mining with non-trivial
- *       diff. {@code onBankChange} consumes the buffered Mining-XP-delta before the inventory
- *       event arrives, leaving the inventory diff held until it ages out. Specific to v0.3.0
- *       (no bank handler in v0.2.0); rollback restores working behavior.</li>
- * </ul>
- *
- * <p>{@link #baseGameMiningSwing_noBankEvents_recordsEvent} is the load-bearing distinguisher.
- * If it fails, Scenario I is confirmed. If it passes,
- * {@link #bankEventBetweenXpAndInventory_doesNotStealInventoryEmit} probes Scenario II.
+ * <p><strong>v0.3.2 status:</strong> the bank-handler architecture has been reverted after
+ * the Endless Harvest test on a Leagues alt empirically demonstrated that bank events do not
+ * fire while the bank UI is closed. The {@code bankEvent*} tests retained here verify the
+ * post-revert contract — bank container events are ignored entirely, so a bank event
+ * arriving between an XP delta and an inventory event must not perturb the inventory
+ * pairing.
  */
 public class PluginEventRoutingTest
 {
@@ -165,64 +152,39 @@ public class PluginEventRoutingTest
 	// --- Scenario II distinguisher ---
 
 	/**
-	 * Probes the bank-event-XP-consumption hypothesis. Setup: bank baseline, then animation,
-	 * then XP delta buffered, then a bank event with non-empty diff arrives BEFORE the
-	 * inventory event. Per the v0.3.0 gate logic, {@code onBankChange} would consume the
-	 * buffered XP delta and emit the bank items, leaving the subsequent inventory event with
-	 * no XP delta to pair against — its diff would age out unconsumed.
-	 *
-	 * <p>If this scenario reproduces in the test, Scenario II is the bug. If it doesn't (the
-	 * inventory ore records correctly alongside the bank emit, or the bank emit is filtered),
-	 * the v0.3.0 regression is something else.
-	 *
-	 * <p><strong>v0.3.1 status:</strong> ignored. The test confirmed Scenario II is a real
-	 * bug at the gate level (v0.3.0's {@code onBankChange} consumes the buffered XP delta
-	 * when it pairs with a bank-with-diff event in the same window). But the Leagues
-	 * auto-bank case the bank handler was originally added to fix has NOT been empirically
-	 * validated on either v0.2.0 or v0.3.0 — Kyle's only post-distribution Leagues failure
-	 * report was on v0.3.0, which we now know was upstream-blocked by the animation
-	 * namespace gap (fixed in v0.3.1). It's possible the bank-handler architecture is sound
-	 * and was just being shadowed by the animation bug; that's only resolvable after Kyle
-	 * re-tests on v0.3.1. Reverting the bank handler now would erase that signal. Deferred
-	 * for now; reconsider after v0.3.1 distributes and Kyle reports back. If auto-bank still
-	 * fails, the choice is (a) re-architect onBankChange to defer to inventory or (b) revert
-	 * entirely as the empirically-broken Leagues feature it was hedged to be in v0.3.0's
-	 * original entry.
+	 * Bank events arriving between an XP delta and an inventory event must not steal the
+	 * pairing. Pre-v0.3.2 this was the hypothesized Scenario II bug at the gate level; in
+	 * v0.3.2 the bank handler is fully reverted and bank container events are ignored at
+	 * the plugin's dispatch layer, so the test now verifies a stronger property: bank events
+	 * have no observable effect at all on the inventory path. Passes naturally.
 	 */
-	@Ignore("v0.3.1 deferred — see javadoc; the bug this test surfaces is real but latent")
 	@Test
 	public void bankEventBetweenXpAndInventory_doesNotStealInventoryEmit()
 	{
-		// Login baselines for both containers.
+		// Login baseline (inventory only — bank is no longer routed in v0.3.2).
 		plugin.handleItemContainerEvent(INVENTORY_ID, snapshot(), 1000L);
-		plugin.handleItemContainerEvent(BANK_ID, snapshot(), 1000L);
 
 		// Swing: animation, then XP delta, then BANK event with diff, then inventory event.
 		gate.recordMiningAnimation(2000L);
 		gate.onMiningXpDelta(2100L);
 
-		// Bank gets a positive delta from some unrelated source (a synthetic stand-in for
-		// whatever real-client event-stream behavior pushes bank state during base-game).
-		// Item ID arbitrary; what matters is the diff is non-empty.
+		// Bank event with non-empty diff arrives between the XP delta and the inventory
+		// event. Pre-v0.3.2 this could perturb the gate's pairing; v0.3.2 drops bank events
+		// entirely at the dispatch layer, so the buffered XP delta survives intact.
 		plugin.handleItemContainerEvent(BANK_ID, snapshot(ItemID.LOGS, 5), 2150L);
 
-		// Inventory gains the actual mined ore.
+		// Inventory gains the actual mined ore — pairs with the still-buffered XP delta.
 		plugin.handleItemContainerEvent(INVENTORY_ID, snapshot(ItemID.COPPER_ORE, 1), 2200L);
 
-		// Expectation under correct v0.3.0 contract: both should be counted (Path B doesn't
-		// filter by item type; XP delta should pair with whichever item event arrives in
-		// window, and the held diff machinery should preserve the second event).
-		// Bug hypothesis: only the bank emit fires, the inventory emit is starved.
 		assertEquals("inventory ore must record even when a bank event interleaves",
 			1, window.totalCount(ItemID.COPPER_ORE));
 	}
 
 	/**
 	 * Bank events with empty diffs (e.g., container-state re-broadcast with no actual
-	 * change) must not interfere with inventory event pairing. The {@code if (diff.isEmpty())
-	 * return} early-out in {@code onBankChange} should prevent any interaction with the
-	 * inventory path. Sanity check that the bank handler is genuinely a no-op when there's
-	 * nothing to emit.
+	 * change) must not interfere with inventory event pairing. v0.3.2: the dispatch layer
+	 * drops all bank container events before they reach the gate, so empty/full diffs are
+	 * indistinguishable here — both are no-ops by virtue of routing.
 	 */
 	@Test
 	public void emptyBankEvents_doNotInterfereWithBaseGameMining()
@@ -276,5 +238,76 @@ public class PluginEventRoutingTest
 		// Should be a no-op; no NPE, no recording.
 		plugin.handleItemContainerEvent(INVENTORY_ID, snapshot(ItemID.COPPER_ORE, 1), 2200L);
 		assertEquals(0, window.totalCount());
+	}
+
+	// --- v0.3.2 animation heartbeat tests ---
+
+	/**
+	 * The per-tick heartbeat refreshes the gate when the player's current animation is a
+	 * mining animation. Pre-v0.3.2, the gate only refreshed on {@code AnimationChanged}
+	 * transitions, which left it stale during continuous in-place animation loops — title
+	 * never green, ETA hidden during active mining. The heartbeat closes that gap.
+	 */
+	@Test
+	public void heartbeatRefreshesGate_whenAnimationIsMiningAnim()
+	{
+		// Use adamant wall-rock animation (6756) — verified mining animation per StaticDataTest.
+		final int ADAMANT_WALL_ANIM = 6756;
+		assertFalse("gate must start unrefreshed", gate.isAnimationGateActive(1000L));
+
+		plugin.handleAnimationHeartbeat(ADAMANT_WALL_ANIM, 1000L);
+		assertTrue("gate must be active immediately after heartbeat",
+			gate.isAnimationGateActive(1000L));
+		assertTrue("gate must remain active just under animationGateMs",
+			gate.isAnimationGateActive(3500L));
+		assertFalse("gate must close past animationGateMs",
+			gate.isAnimationGateActive(4500L));
+	}
+
+	/**
+	 * The heartbeat is a no-op for non-mining animations. Catches a regression where the
+	 * heartbeat would refresh the gate based on, e.g., a smithing or woodcutting animation
+	 * that happens to share a numerical neighborhood with mining anims.
+	 */
+	@Test
+	public void heartbeatDoesNotRefreshGate_forNonMiningAnimation()
+	{
+		// -1 is the OSRS idle/no-animation sentinel; not in MiningAnimations.
+		final int IDLE = -1;
+		plugin.handleAnimationHeartbeat(IDLE, 1000L);
+		assertFalse("gate must remain inactive when animation is idle",
+			gate.isAnimationGateActive(1000L));
+	}
+
+	/**
+	 * Heartbeat must continue to refresh the gate during sustained mining. Reproduces the
+	 * FlowersOEvil-reported bug pattern in unit form: many ticks, no inter-tick
+	 * AnimationChanged events (only the heartbeat is firing), gate must stay open.
+	 */
+	@Test
+	public void heartbeatKeepsGateOpenAcrossManyTicks_simulatesContinuousMining()
+	{
+		final int ADAMANT_WALL_ANIM = 6756;
+		// Simulate 30 game ticks of continuous mining. Without the heartbeat the gate would
+		// close 3000ms after the first tick; with it, every tick refreshes.
+		for (int tick = 0; tick < 30; tick++)
+		{
+			long now = 1000L + tick * 600L; // 600ms per tick = standard OSRS tick rate
+			plugin.handleAnimationHeartbeat(ADAMANT_WALL_ANIM, now);
+			assertTrue("gate must stay open at tick " + tick,
+				gate.isAnimationGateActive(now));
+		}
+	}
+
+	/**
+	 * Null guard: heartbeat ticks arriving before {@code startUp} populates the gate must
+	 * be silently ignored.
+	 */
+	@Test
+	public void heartbeatBeforeGateInitialized_isIgnored() throws Exception
+	{
+		setField(plugin, "miningGate", null);
+		// Should be a no-op; no NPE.
+		plugin.handleAnimationHeartbeat(6756, 1000L);
 	}
 }

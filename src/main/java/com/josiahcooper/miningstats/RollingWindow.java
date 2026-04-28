@@ -132,6 +132,40 @@ public final class RollingWindow
 		return sessionByOre.getOrDefault(oreId, 0);
 	}
 
+	/**
+	 * True if at least one recorded event has a wall-clock timestamp within {@code windowMs}
+	 * of {@code nowWallMs}. Used by the overlay's auto-hide check.
+	 *
+	 * <p>This is intentionally distinct from {@link #activeRatePerHour}: the rate calculation
+	 * runs on the active-time axis, which freezes when the player goes AFK. Auto-hide is a
+	 * wall-clock concern — the overlay should disappear after the player has been away from
+	 * mining for {@code windowMs} of real elapsed time, regardless of whether the active-time
+	 * cutoff has slid past stored events. Pre-v0.3.2 used {@code rate > 0} as the activity
+	 * proxy, which incorrectly stayed true forever after AFK because both {@code currentActive}
+	 * and the cutoff froze together, leaving stored events permanently inside the window.
+	 *
+	 * @param windowMs    look-back window in wall-clock milliseconds (typically the configured rolling window)
+	 * @param nowWallMs   current wall-clock time
+	 */
+	public boolean hasEventsWithinWallTime(long windowMs, long nowWallMs)
+	{
+		long cutoff = nowWallMs - windowMs;
+		// Iterate in reverse — most recent events are at the tail and most likely to satisfy.
+		Iterator<Event> it = events.descendingIterator();
+		while (it.hasNext())
+		{
+			Event e = it.next();
+			if (e.wallTimeMs >= cutoff)
+			{
+				return true;
+			}
+			// Events are insertion-ordered ascending by wallTimeMs; once we see one older than
+			// the cutoff while iterating tail-to-head, all earlier events are also older.
+			return false;
+		}
+		return false;
+	}
+
 	/** Lifetime per-ore counts, ordered descending by count. */
 	public Map<Integer, Integer> totalByOre()
 	{

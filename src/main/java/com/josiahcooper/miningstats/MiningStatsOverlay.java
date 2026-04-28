@@ -49,17 +49,20 @@ public class MiningStatsOverlay extends OverlayPanel
 		long windowMs = config.windowMinutes() * 60_000L;
 
 		// Auto-hide: suppress the panel when the player isn't mining now AND no events
-		// remain inside the rolling window. The pre-first-mine case (rate == 0, total == 0)
-		// is naturally subsumed; the post-session-drain case (mined earlier, walked away,
-		// rolling window emptied) is the new behavior over v0.1.x. Compute the rate once
-		// and reuse below — activeRatePerHour iterates the event log, not free per call.
+		// remain inside the wall-clock rolling window. The pre-first-mine case (no events,
+		// total == 0) is naturally subsumed; the post-session-drain case (mined earlier,
+		// walked away, real time has elapsed past the window) is the intended behavior.
+		//
+		// v0.3.2: switched from `rate > 0` to a wall-clock event scan. Active-time freezes
+		// at the AFK threshold, so the rate-based check stayed true forever after the
+		// player walked away — the overlay never auto-hid in practice.
 		boolean activelyMining = plugin.isCurrentlyMining();
-		double rate = window.activeRatePerHour(windowMs, now);
-		boolean hasRecentActivity = rate > 0.0;
+		boolean hasRecentActivity = window.hasEventsWithinWallTime(windowMs, now);
 		if (!activelyMining && !hasRecentActivity)
 		{
 			return null;
 		}
+		double rate = window.activeRatePerHour(windowMs, now);
 
 		panelComponent.getChildren().clear();
 		panelComponent.setPreferredSize(new Dimension(160, 0));
